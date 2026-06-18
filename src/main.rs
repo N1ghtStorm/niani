@@ -1,21 +1,26 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::process;
+use std::process::Command;
 
 const LANGUAGE_VERSION: &str = "0.1.0";
-const MANIFEST_FILE: &str = "Nia.toml";
+const MANIFEST_FILE: &str = "Niani.toml";
 const MAIN_FILE: &str = "main.nia";
 
 fn main() {
-    if let Err(err) = run_cli(env::args().skip(1)) {
-        eprintln!("error: {err}");
-        process::exit(1);
+    match run_cli(env::args().skip(1)) {
+        Ok(code) => process::exit(code),
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
     }
 }
 
-fn run_cli<I, S>(args: I) -> Result<(), String>
+fn run_cli<I, S>(args: I) -> Result<i32, String>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
@@ -33,18 +38,25 @@ where
             if let Some(extra) = args.next() {
                 return Err(format!("unexpected argument `{extra}`\n{}", usage()));
             }
-            new_project(Path::new(&path))
+            new_project(Path::new(&path))?;
+            Ok(0)
+        }
+        "run" => {
+            if let Some(extra) = args.next() {
+                return Err(format!("unexpected argument `{extra}`\n{}", usage()));
+            }
+            run_project(&env::current_dir().map_err(|e| e.to_string())?)
         }
         "-h" | "--help" | "help" => {
             println!("{}", usage());
-            Ok(())
+            Ok(0)
         }
         other => Err(format!("unknown command `{other}`\n{}", usage())),
     }
 }
 
 fn usage() -> String {
-    "usage:\n  niani new <path>\n  niani help".to_string()
+    "usage:\n  niani new <path>\n  niani run\n  niani help".to_string()
 }
 
 fn new_project(path: &Path) -> Result<(), String> {
@@ -64,6 +76,101 @@ fn new_project(path: &Path) -> Result<(), String> {
 
     println!("created niani project `{name}` at {}", path.display());
     Ok(())
+}
+
+fn run_project(project_dir: &Path) -> Result<i32, String> {
+    let manifest = project_dir.join(MANIFEST_FILE);
+    if !manifest.is_file() {
+        return Err(format!(
+            "`{}` not found in {}; run `niani run` from a niani project root",
+            MANIFEST_FILE,
+            project_dir.display()
+        ));
+    }
+
+    let entry = project_dir.join("src").join(MAIN_FILE);
+    if !entry.is_file() {
+        return Err(format!(
+            "entry point `{}` not found",
+            project_dir.join("src").join(MAIN_FILE).display()
+        ));
+    }
+
+    let status = run_nialang(&entry, project_dir)?;
+    Ok(status
+        .code()
+        .unwrap_or(if status.success() { 0 } else { 101 }))
+}
+
+fn run_nialang(entry: &Path, project_dir: &Path) -> Result<process::ExitStatus, String> {
+    if let Some(status) = try_nialang_from_env(entry, project_dir)? {
+        return Ok(status);
+    }
+    if let Some(status) = try_nialang_from_path(entry, project_dir)? {
+        return Ok(status);
+    }
+    run_nialang_from_sibling_repo(entry, project_dir)
+}
+
+fn try_nialang_from_env(
+    entry: &Path,
+    project_dir: &Path,
+) -> Result<Option<process::ExitStatus>, String> {
+    let Ok(bin) = env::var("NIALANG_BIN") else {
+        return Ok(None);
+    };
+    Command::new(&bin)
+        .arg(entry)
+        .current_dir(project_dir)
+        .status()
+        .map(Some)
+        .map_err(|e| format!("failed to run `{bin}` from NIALANG_BIN: {e}"))
+}
+
+fn try_nialang_from_path(
+    entry: &Path,
+    project_dir: &Path,
+) -> Result<Option<process::ExitStatus>, String> {
+    match Command::new("nialang")
+        .arg(entry)
+        .current_dir(project_dir)
+        .status()
+    {
+        Ok(status) => Ok(Some(status)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("failed to run `nialang`: {e}")),
+    }
+}
+
+fn run_nialang_from_sibling_repo(
+    entry: &Path,
+    project_dir: &Path,
+) -> Result<process::ExitStatus, String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| "could not locate sibling nialang repository".to_string())?
+        .join("nialang")
+        .join("Cargo.toml");
+    if !manifest.is_file() {
+        return Err(
+            "`nialang` was not found on PATH and sibling `../nialang/Cargo.toml` is missing".into(),
+        );
+    }
+
+    Command::new("cargo")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--")
+        .arg(entry)
+        .current_dir(project_dir)
+        .status()
+        .map_err(|e| {
+            format!(
+                "failed to run nialang through `{}`: {e}",
+                manifest.display()
+            )
+        })
 }
 
 fn project_name(path: &Path) -> Result<String, String> {
@@ -161,5 +268,30 @@ mod tests {
     fn run_cli_requires_new_path() {
         let err = run_cli(["new"]).expect_err("missing path");
         assert!(err.contains("niani new <path>"), "{err}");
+    }
+
+    #[test]
+    fn run_project_requires_manifest() {
+        let path = temp_project_path("no_manifest");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("project dir");
+
+        let err = run_project(&path).expect_err("missing manifest");
+        assert!(err.contains(MANIFEST_FILE), "{err}");
+
+        fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    fn run_project_requires_main_entrypoint() {
+        let path = temp_project_path("no_main");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("project dir");
+        fs::write(path.join(MANIFEST_FILE), manifest_text("no_main")).expect("manifest");
+
+        let err = run_project(&path).expect_err("missing main");
+        assert!(err.contains("src/main.nia"), "{err}");
+
+        fs::remove_dir_all(path).expect("cleanup");
     }
 }
