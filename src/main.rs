@@ -46,6 +46,13 @@ where
             new_project(Path::new(&path))?;
             Ok(0)
         }
+        "init" => {
+            if let Some(extra) = args.next() {
+                return Err(format!("unexpected argument `{extra}`\n{}", usage()));
+            }
+            init_project(&env::current_dir().map_err(|e| e.to_string())?)?;
+            Ok(0)
+        }
         "run" => {
             if let Some(extra) = args.next() {
                 return Err(format!("unexpected argument `{extra}`\n{}", usage()));
@@ -61,7 +68,7 @@ where
 }
 
 fn usage() -> String {
-    "usage:\n  niani new <path>\n  niani run\n  niani help".to_string()
+    "usage:\n  niani new <path>\n  niani init\n  niani run\n  niani help".to_string()
 }
 
 fn new_project(path: &Path) -> Result<(), String> {
@@ -73,13 +80,45 @@ fn new_project(path: &Path) -> Result<(), String> {
     }
 
     let name = project_name(path)?;
-    fs::create_dir_all(path.join("src")).map_err(|e| format!("{}: {e}", path.display()))?;
-    fs::write(path.join(MANIFEST_FILE), manifest_text(&name))
-        .map_err(|e| format!("{}: {e}", path.join(MANIFEST_FILE).display()))?;
-    fs::write(path.join("src").join(MAIN_FILE), main_text())
-        .map_err(|e| format!("{}: {e}", path.join("src").join(MAIN_FILE).display()))?;
+    write_project_files(path, &name)?;
 
     println!("created niani project `{name}` at {}", path.display());
+    Ok(())
+}
+
+fn init_project(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!(
+            "project directory `{}` does not exist",
+            path.display()
+        ));
+    }
+
+    let name = project_name(path)?;
+    write_project_files(path, &name)?;
+
+    println!("initialized niani project `{name}` at {}", path.display());
+    Ok(())
+}
+
+fn write_project_files(path: &Path, name: &str) -> Result<(), String> {
+    let manifest = path.join(MANIFEST_FILE);
+    if manifest.exists() {
+        return Err(format!(
+            "niani project already exists at {}",
+            path.display()
+        ));
+    }
+
+    let entry = path.join("src").join(MAIN_FILE);
+    if entry.exists() {
+        return Err(format!("entry point `{}` already exists", entry.display()));
+    }
+
+    fs::create_dir_all(path.join("src")).map_err(|e| format!("{}: {e}", path.display()))?;
+    fs::write(&manifest, manifest_text(name))
+        .map_err(|e| format!("{}: {e}", manifest.display()))?;
+    fs::write(&entry, main_text()).map_err(|e| format!("{}: {e}", entry.display()))?;
     Ok(())
 }
 
@@ -264,6 +303,40 @@ mod tests {
         fs::create_dir_all(&path).expect("existing dir");
 
         let err = new_project(&path).expect_err("must reject existing path");
+        assert!(err.contains("already exists"), "{err}");
+
+        fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    fn init_project_creates_manifest_and_main_in_current_dir() {
+        let path = temp_project_path("hello_init");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("project dir");
+
+        init_project(&path).expect("init project");
+
+        let manifest = fs::read_to_string(path.join(MANIFEST_FILE)).expect("manifest");
+        let expected_name = path.file_name().and_then(OsStr::to_str).expect("name");
+        assert!(
+            manifest.contains(&format!("name = \"{expected_name}\"")),
+            "{manifest}"
+        );
+
+        let main = fs::read_to_string(path.join("src").join(MAIN_FILE)).expect("main");
+        assert_eq!(main, main_text());
+
+        fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    fn init_project_rejects_existing_manifest() {
+        let path = temp_project_path("existing_init");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("project dir");
+        fs::write(path.join(MANIFEST_FILE), manifest_text("existing_init")).expect("manifest");
+
+        let err = init_project(&path).expect_err("existing project");
         assert!(err.contains("already exists"), "{err}");
 
         fs::remove_dir_all(path).expect("cleanup");
