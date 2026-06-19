@@ -25,7 +25,12 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut args = args.into_iter().map(Into::into);
+    let mut args: Vec<String> = args.into_iter().map(Into::into).collect();
+    if args.first().is_some_and(|arg| arg == "niani") {
+        args.remove(0);
+    }
+
+    let mut args = args.into_iter();
     let Some(cmd) = args.next() else {
         return Err(usage());
     };
@@ -210,7 +215,7 @@ fn toml_escape(s: &str) -> String {
 }
 
 fn main_text() -> &'static str {
-    "fn main() i32 {\n    0\n}\n"
+    "fn main() i32 {\n    println(\"Hello World!\");\n    0\n}\n"
 }
 
 #[cfg(test)]
@@ -262,6 +267,11 @@ mod tests {
         assert!(err.contains("already exists"), "{err}");
 
         fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    fn run_cli_accepts_cargo_subcommand_prefix() {
+        run_cli(["niani", "help"]).expect("cargo niani help");
     }
 
     #[test]
