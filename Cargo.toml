@@ -8,3 +8,4 @@ name = "cargo-niani"
 path = "src/main.rs"
 
 [dependencies]
+nialang = { path = "../nialang" }
